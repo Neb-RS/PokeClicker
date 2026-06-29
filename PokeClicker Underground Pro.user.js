@@ -1,10 +1,14 @@
 // ==UserScript==
 // @name         PokeClicker Underground Pro
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  Reveals Underground treasures and provides optional automatic solving tools.
 // @author       Neb
 // @license      MIT
+
+// @homepageURL  https://github.com/Neb-RS/PokeClicker
+// @supportURL   https://github.com/Neb-RS/PokeClicker/issues
+
 // @match        https://www.pokeclicker.com/
 // @icon         https://www.google.com/s2/favicons?domain=pokeclicker.com
 // @run-at       document-idle
