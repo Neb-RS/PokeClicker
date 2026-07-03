@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeClicker Hatchery Egg Identifier
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  Overlays each hatchery egg with the Pokémon name and catch/shiny status.
 // @author       Neb
 // @license      MIT
@@ -69,7 +69,6 @@
             if (!egg || (typeof egg.isNone === 'function' && egg.isNone())) return null;
             return egg;
         } catch (e) {
-            console.warn('Failed to retrieve active egg:', e);
             return null;
         }
     }
@@ -87,6 +86,7 @@
 
         const overlay = document.createElement('div');
         overlay.className = 'egg-name-overlay';
+        overlay.dataset.pokemonId = pokemonId;
 
         const ball = document.createElement('img');
         ball.src = CONFIG.STATUS_BALLS[status];
@@ -103,6 +103,7 @@
     /**
      * Inject or refresh name/status overlays for all egg slots.
      * Removes stale overlays before re-injecting to handle slot changes.
+     * Also neutralises the .clickable top margin so the overlay occupies that space.
      */
     function updateOverlays() {
         const slots = document.querySelectorAll('#eggList .eggSlot');
@@ -110,6 +111,7 @@
         slots.forEach((slot, index) => {
             // Always clear stale overlay first
             const existingOverlay = slot.querySelector('.egg-name-overlay');
+            if (existingOverlay && existingOverlay.dataset.pokemonId === String(egg.pokemon)) return;
             if (existingOverlay) existingOverlay.remove();
 
             const egg = getActiveEgg(index);
@@ -120,7 +122,7 @@
 
             // Use the existing .clickable top margin so the overlay adds no extra height
             const clickable = content.querySelector('.clickable');
-            if (clickable) clickable.style.marginTop = '0';
+            if (clickable && clickable.style.marginTop !== '0px') clickable.style.marginTop = '0';
 
             // Proceed with UI injection
             content.insertAdjacentElement('afterbegin', createOverlay(egg.pokemon));
