@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeClicker Hatchery Egg Identifier
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  Overlays each hatchery egg with the Pokémon name and catch/shiny status.
 // @author       Neb
 // @license      MIT
