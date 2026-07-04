@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeClicker Hatchery Egg Identifier
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @description  Overlays each hatchery egg with the Pokémon name and catch/shiny status.
 // @author       Neb
 // @license      MIT
@@ -14,6 +14,8 @@
 // @run-at       document-idle
 // @grant        none
 // @noframes
+// @downloadURL https://update.greasyfork.org/scripts/584861/PokeClicker%20Hatchery%20Egg%20Identifier.user.js
+// @updateURL https://update.greasyfork.org/scripts/584861/PokeClicker%20Hatchery%20Egg%20Identifier.meta.js
 // ==/UserScript==
 
 (function() {
@@ -87,6 +89,7 @@
         const overlay = document.createElement('div');
         overlay.className = 'egg-name-overlay';
         overlay.dataset.pokemonId = pokemonId;
+        overlay.dataset.status = status;
 
         const ball = document.createElement('img');
         ball.src = CONFIG.STATUS_BALLS[status];
@@ -109,12 +112,14 @@
         const slots = document.querySelectorAll('#eggList .eggSlot');
 
         slots.forEach((slot, index) => {
-            // Always clear stale overlay first
-            const existingOverlay = slot.querySelector('.egg-name-overlay');
-            if (existingOverlay && existingOverlay.dataset.pokemonId === String(egg.pokemon)) return;
-            if (existingOverlay) existingOverlay.remove();
-
             const egg = getActiveEgg(index);
+            const existingOverlay = slot.querySelector('.egg-name-overlay');
+            if (existingOverlay) {
+                if (egg &&
+                    existingOverlay.dataset.pokemonId === String(egg.pokemon) &&
+                    existingOverlay.dataset.status === getEggStatus(egg.pokemon)) return;
+                existingOverlay.remove();
+            }
             if (!egg) return;
 
             const content = slot.querySelector('.content');
