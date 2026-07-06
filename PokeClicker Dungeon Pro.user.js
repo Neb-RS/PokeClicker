@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeClicker Dungeon Pro
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  Computes the fastest weighted route to the boss — clearing enemies (all, or just the necessary ones), looting selected chest tiers, then fighting the boss. Optional AutoWalk and Repeat toggles.
 // @author       Neb
 // @license      MIT
@@ -23,9 +23,7 @@
     const CONFIG = {
         CHECK_INTERVAL_MS: 50,
         ACTION_DELAY_MS: 50,
-        CHEST_OPEN_RETRY_MS: 500,
-        CHEST_OPEN_MAX_ATTEMPTS: 3,
-        TILE: { EMPTY: 0, ENEMY: 2, CHEST: 3, BOSS: 4 },
+        TILE: { EMPTY: 0, ENEMY: 2, CHEST: 3, BOSS: 4, LADDER: 5 },
         CHEST_TIERS: ['common', 'rare', 'epic', 'legendary', 'mythic'],
         ENEMY_WEIGHT: 20,
         CONTROL_ID: 'neb_pokeclicker_dungeon_controls',
@@ -52,11 +50,7 @@
         constructor() {
             this.plan = null;
             this.lastActionTime = 0;
-
-            // Chest open handshake: some chests need more than one interact to resolve.
-            this.pendingChestKey = null;
-            this.pendingChestAttempts = 0;
-            this.pendingChestOpenTime = null;
+            this.floor = null;
 
             // Render cache: lets renderBoard touch only cells that actually changed.
             this.boardPainted = false;
@@ -281,6 +275,7 @@
         .dungeon-tile-enemy   { background: rgba(231,76,60,0.7)   !important; }
         .dungeon-tile-chest   { background: rgba(241,196,15,0.5)  !important; }
         .dungeon-tile-boss    { background: rgba(155,89,182,0.7)  !important; }
+        .dungeon-tile-ladder  { background: rgba(46,204,113,0.6)  !important; }
         .dungeon-tile-empty   { background: rgba(255,255,255,0.2) !important; }
         .dungeon-tile-visited { background: transparent           !important; }
         .dungeon-path-highlight {
@@ -303,17 +298,22 @@
     }
 
     /**
-     * Scan the board for the (single) boss tile.
+     * Scan the board for the tile this floor's route should end at: the boss
+     * tile if this is the final floor, otherwise the ladder tile leading to the next
+     * floor. 
      * @param {Array} board - 2D grid of tiles
-     * @returns {{x, y} | null} Boss coordinates, or null if not found
+     * @returns {{x, y} | null} Goal coordinates, or null if neither tile is found
      */
-    function findBossTile(board) {
+    function findGoalTile(board) {
+        let ladder = null;
         for (let y = 0; y < board.length; y++) {
             for (let x = 0; x < board[y].length; x++) {
-                if (board[y][x].type() === CONFIG.TILE.BOSS) return { x, y };
+                const type = board[y][x].type();
+                if (type === CONFIG.TILE.BOSS) return { x, y };
+                if (type === CONFIG.TILE.LADDER) ladder = { x, y };
             }
         }
-        return null;
+        return ladder;
     }
 
     // ============ MIN-HEAP ============
@@ -378,36 +378,22 @@
 
     /**
      * Compute the fastest weighted path between two tiles via Dijkstra.
-     * Enemy tiles cost CONFIG.ENEMY_WEIGHT; the boss tile and any already-visited
-     * tile cost 0 to step onto (so re-crossing ground already walked this route is
-     * free); everything else costs 1.
+     * Every step costs 1 — matching the one real AutoWalk move it takes to cross any
+     * tile, visited or not — except stepping onto a not-yet-cleared enemy tile, which
+     * costs CONFIG.ENEMY_WEIGHT instead. 
      * @param {Array} board - 2D grid of tiles
      * @param {{x, y}} start - Start position
      * @param {{x, y}} goal - Target position
-     * @param {Set<string>} visited - tileKeys already walked this route
+     * @param {Set<string>} visited - tileKeys already walked this route (cleared enemies
+     *   on this set no longer cost ENEMY_WEIGHT, since they're already defeated)
      * @returns {{path: Array<{x, y}>, cost: number} | null} Path (excluding start, including goal) and its cost, or null if unreachable
      */
     function computeWeightedPath(board, start, goal, visited) {
         const heap = new MinHeap();
         const bestCost = new Map();
         const goalKey = tileKey(goal.x, goal.y);
-        const seeded = new Set([tileKey(start.x, start.y)]);
 
         heap.push({ x: start.x, y: start.y, path: [], cost: 0 });
-
-        // Seed every non-enemy tile adjacent to the visited region at cost 0 —
-        // enemies stay excluded so ENEMY_WEIGHT still applies in full to them.
-        visited.forEach(key => {
-            const [vx, vy] = key.split(',').map(Number);
-            for (const [dx, dy] of DIRECTIONS) {
-                const nx = vx + dx, ny = vy + dy, nk = tileKey(nx, ny);
-                if (seeded.has(nk) || visited.has(nk)) continue;
-                const tile = board[ny]?.[nx];
-                if (!tile || tile.type() === CONFIG.TILE.ENEMY) continue;
-                seeded.add(nk);
-                heap.push({ x: nx, y: ny, path: [{ x: nx, y: ny }], cost: 0 });
-            }
-        });
 
         while (heap.size) {
             const { x, y, path, cost } = heap.pop();
@@ -425,8 +411,7 @@
                 if (!neighborTile) continue;
 
                 const nk = tileKey(nx, ny);
-                const stepCost = (visited.has(nk) || neighborTile.type() === CONFIG.TILE.BOSS) ? 0
-                                : neighborTile.type() === CONFIG.TILE.ENEMY ? CONFIG.ENEMY_WEIGHT : 1;
+                const stepCost = (!visited.has(nk) && neighborTile.type() === CONFIG.TILE.ENEMY) ? CONFIG.ENEMY_WEIGHT : 1;
                 heap.push({ x: nx, y: ny, path: path.concat({ x: nx, y: ny }), cost: cost + stepCost });
             }
         }
@@ -618,39 +603,40 @@
      *      otherwise only enemies naturally on that route get fought.
      *   2. Loot   — loop back and actually open each qualifying chest. This is ~free
      *      movement since it's re-crossing ground already walked in phase 1.
-     *   3. Boss   — path to the boss and fight.
+     *   3. Goal   — path to the floor's goal tile and interact (fight the boss, or step
+     *      onto the ladder to advance on non-final floors of multi-floor dungeons).
      * @param {Array} board - 2D grid of tiles
      * @param {{x, y}} start - Player start position
-     * @param {{x, y}} boss - Boss tile position
+     * @param {{x, y}} goal - Boss or ladder tile position, from findGoalTile
      * @param {Set<string>} selectedTiers - Selected chest tiers
      * @param {boolean} allEnemiesEnabled - Clear every enemy instead of just the necessary ones
      * @returns {Array<{x, y, action}>} Full path to walk
      */
-    function planRoute(board, start, boss, selectedTiers, allEnemiesEnabled) {
+    function planRoute(board, start, goal, selectedTiers, allEnemiesEnabled) {
         const qualifyingChests = findQualifyingChests(board, selectedTiers);
         const visited = buildVisitedSet(board, start);
 
-        // Phase 1: clear enemies — either everything, or just what's on the way to the chests/boss.
+        // Phase 1: clear enemies — either everything, or just what's on the way to the chests/goal.
         const clearingStops = allEnemiesEnabled ? findAllEnemies(board) : qualifyingChests;
         const clearingOrder = orderStops(board, start, clearingStops, new Set(visited));
         const clearingLeg = routeInOrder(board, start, clearingOrder, visited);
-        const clearingToBoss = computeWeightedPath(board, clearingLeg.endPosition, boss, visited);
-        clearingToBoss?.path.forEach(({ x, y }) => visited.add(tileKey(x, y)));
-        const afterClearing = clearingToBoss ? boss : clearingLeg.endPosition;
+        const clearingToGoal = computeWeightedPath(board, clearingLeg.endPosition, goal, visited);
+        clearingToGoal?.path.forEach(({ x, y }) => visited.add(tileKey(x, y)));
+        const afterClearing = clearingToGoal ? goal : clearingLeg.endPosition;
 
         // Phase 2: board is clear — loop back and open each qualifying chest.
         const lootingOrder = orderStops(board, afterClearing, qualifyingChests, new Set(visited));
         const lootingLeg = routeInOrder(board, afterClearing, lootingOrder, visited, 'openChest');
 
-        // Phase 3: head to the boss and fight.
-        const bossLeg = computeWeightedPath(board, lootingLeg.endPosition, boss, visited);
+        // Phase 3: head to the goal tile (boss fight, or ladder to the next floor) and interact.
+        const goalLeg = computeWeightedPath(board, lootingLeg.endPosition, goal, visited);
 
-        return [...clearingLeg.route, ...(clearingToBoss?.path ?? []), ...lootingLeg.route, ...(bossLeg?.path ?? [])];
+        return [...clearingLeg.route, ...(clearingToGoal?.path ?? []), ...lootingLeg.route, ...(goalLeg?.path ?? [])];
     }
 
     // ============ VISUAL UPDATES ============
 
-    const TILE_BACKGROUND_CLASSES = ['dungeon-tile-enemy', 'dungeon-tile-chest', 'dungeon-tile-boss', 'dungeon-tile-empty', 'dungeon-tile-visited'];
+    const TILE_BACKGROUND_CLASSES = ['dungeon-tile-enemy', 'dungeon-tile-chest', 'dungeon-tile-boss', 'dungeon-tile-ladder', 'dungeon-tile-empty', 'dungeon-tile-visited'];
 
     /**
      * Resolve the background class for a tile that hasn't been visited yet.
@@ -662,6 +648,7 @@
         if (type === CONFIG.TILE.ENEMY) return 'dungeon-tile-enemy';
         if (type === CONFIG.TILE.CHEST) return 'dungeon-tile-chest';
         if (type === CONFIG.TILE.BOSS)  return 'dungeon-tile-boss';
+        if (type === CONFIG.TILE.LADDER) return 'dungeon-tile-ladder';
         return 'dungeon-tile-empty';
     }
 
@@ -770,24 +757,37 @@
         const board = DungeonRunner.map.board()[floor];
         if (!board) return;
 
-        // Combat blocks everything else — wait it out.
-        const inCombat = !!DungeonBattle.enemyPokemon?.() && DungeonBattle.enemyPokemon().health?.() > 0;
+        // A ladder interaction moves the player to a new floor with its own board —
+        // the cached plan and render state belong to the floor just left, so drop them
+        // and start fresh rather than sitting idle with a drained, never-recomputed plan.
+        if (activeRun.floor !== floor) {
+            activeRun.floor = floor;
+            activeRun.plan = null;
+            activeRun.boardPainted = false;
+            activeRun.visitedCache = new Map();
+            activeRun.previousPathSet = new Set();
+        }
+
+        // Combat (or the post-victory catch attempt) blocks everything else — wait it
+        // out. These are the same flags DungeonMap.hasAccessToTile itself checks before
+        // allowing any move, so this stays in lockstep with the engine's own gating.
+        const inCombat = DungeonRunner.fighting() || DungeonBattle.catching();
         if (inCombat) return;
 
-        // Compute the path once per dungeon entry. It is walked in full and
-        // never replanned mid-run, so enemies on it are fought, not avoided.
+        // Compute the path once per floor. It is walked in full and never replanned
+        // mid-run, so enemies on it are fought, not avoided.
         if (activeRun.plan === null) {
-            const boss = findBossTile(board);
+            const goal = findGoalTile(board);
             const start = DungeonRunner.map.playerPosition();
             const selectedTiers = getSelectedChestTiers();
             const allEnemies = isAllEnemiesEnabled();
 
-            if (!boss) {
+            if (!goal) {
                 activeRun.plan = [];
             } else if (!allEnemies && selectedTiers.size === 0) {
-                activeRun.plan = computeWeightedPath(board, start, boss, buildVisitedSet(board, start))?.path ?? [];
+                activeRun.plan = computeWeightedPath(board, start, goal, buildVisitedSet(board, start))?.path ?? [];
             } else {
-                activeRun.plan = planRoute(board, start, boss, selectedTiers, allEnemies);
+                activeRun.plan = planRoute(board, start, goal, selectedTiers, allEnemies);
             }
         }
 
@@ -811,43 +811,21 @@
 
         const currentTile = DungeonRunner.map.currentTile();
 
-        // Standing on a chest: only open it if this arrival was tagged 'openChest'
-        // (the phase-2 loot pass) or we're mid-handshake from a previous tick. During
-        // phase 1 (clearing) we deliberately walk through chests without opening them,
-        // since opening one makes any remaining enemies tougher to fight.
-        if (currentTile.type() === CONFIG.TILE.CHEST && (arrivedAction === 'openChest' || activeRun.pendingChestKey === playerKey)) {
+        // Standing on a chest during the phase-2 loot pass: open it directly via the
+        // engine's own openChest().
+        if (currentTile.type() === CONFIG.TILE.CHEST && arrivedAction === 'openChest') {
             const tier = currentTile.metadata?.tier || 'common';
             if (getSelectedChestTiers().has(tier)) {
-                if (activeRun.pendingChestKey === playerKey) {
-                    const elapsed = now - activeRun.pendingChestOpenTime;
-                    if (elapsed >= CONFIG.CHEST_OPEN_RETRY_MS) {
-                        if (activeRun.pendingChestAttempts < CONFIG.CHEST_OPEN_MAX_ATTEMPTS) {
-                            DungeonRunner.handleInteraction();
-                            activeRun.pendingChestAttempts++;
-                            activeRun.pendingChestOpenTime = now;
-                        } else {
-                            activeRun.pendingChestKey = null;
-                            activeRun.pendingChestAttempts = 0;
-                            activeRun.pendingChestOpenTime = null;
-                        }
-                    }
-                } else {
-                    DungeonRunner.handleInteraction();
-                    activeRun.pendingChestKey = playerKey;
-                    activeRun.pendingChestAttempts = 1;
-                    activeRun.pendingChestOpenTime = now;
-                }
+                DungeonRunner.openChest();
                 activeRun.lastActionTime = now;
                 return;
             }
-        } else if (activeRun.pendingChestKey) {
-            activeRun.pendingChestKey = null;
-            activeRun.pendingChestAttempts = 0;
-            activeRun.pendingChestOpenTime = null;
         }
 
-        // Standing on the boss tile with the path complete: fight.
-        if (currentTile.type() === CONFIG.TILE.BOSS && activeRun.plan.length === 0 && !DungeonRunner.fightingBoss()) {
+        // Standing on the goal tile with the path complete: fight the boss, or step
+        // onto the ladder to advance to the next floor.
+        const isGoalTile = currentTile.type() === CONFIG.TILE.BOSS || currentTile.type() === CONFIG.TILE.LADDER;
+        if (isGoalTile && activeRun.plan.length === 0 && !DungeonRunner.fightingBoss()) {
             DungeonRunner.handleInteraction();
             activeRun.lastActionTime = now;
             return;
